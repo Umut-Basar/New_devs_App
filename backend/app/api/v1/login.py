@@ -1,12 +1,13 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Depends
 from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any
 from ...database import supabase
 from ...core.tenant_resolver import TenantResolver
+from ...core.auth import authenticate_request
 from ...models.auth import Permission
 import logging
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import jwt
 from ...config import settings
 
@@ -44,14 +45,16 @@ async def login(request: LoginRequest):
             logger.info("[LOGIN] Challenge Mode: Tenant A (Sunset Properties)")
             
             # Create mock JWT token
+            now = datetime.now(timezone.utc)
             user_data = {
                 "id": "user-sunset",
+                "sub": "user-sunset",
                 "email": "sunset@propertyflow.com",
                 "app_metadata": {"role": "user", "tenant_id": "tenant-a"},
                 "user_metadata": {"name": "Sunset Properties Manager"},
                 "aud": "authenticated",
-                "created_at": datetime.utcnow().isoformat(),
-                "exp": datetime.utcnow() + timedelta(hours=24)
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(hours=24)).timestamp()),
             }
             
             token = jwt.encode(user_data, settings.secret_key, algorithm="HS256")
@@ -74,14 +77,16 @@ async def login(request: LoginRequest):
             logger.info("[LOGIN] Challenge Mode: Tenant B (Ocean Rentals)")
             
             # Create mock JWT token
+            now = datetime.now(timezone.utc)
             user_data = {
                 "id": "user-ocean",
+                "sub": "user-ocean",
                 "email": "ocean@propertyflow.com",
                 "app_metadata": {"role": "user", "tenant_id": "tenant-b"},
                 "user_metadata": {"name": "Ocean Rentals Manager"},
                 "aud": "authenticated",
-                "created_at": datetime.utcnow().isoformat(),
-                "exp": datetime.utcnow() + timedelta(hours=24)
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(hours=24)).timestamp()),
             }
             
             token = jwt.encode(user_data, settings.secret_key, algorithm="HS256")
@@ -147,13 +152,17 @@ async def login(request: LoginRequest):
             tenant_id = await TenantResolver.resolve_tenant_id(user_id=user.id, user_email=user.email)
             
             # Create JWT token
+            now = datetime.now(timezone.utc)
             user_data = {
                 "id": user.id,
+                "sub": user.id,
                 "email": user.email,
                 "is_admin": is_admin,
                 "tenant_id": tenant_id,
-                "exp": datetime.utcnow() + timedelta(hours=24),
-                "aud": "authenticated"
+                "app_metadata": {"tenant_id": tenant_id, "role": "admin" if is_admin else "user"},
+                "aud": "authenticated",
+                "iat": int(now.timestamp()),
+                "exp": int((now + timedelta(hours=24)).timestamp()),
             }
             
             token = jwt.encode(user_data, settings.secret_key, algorithm="HS256")
@@ -197,3 +206,22 @@ async def logout():
     """Logout endpoint"""
     # For JWT-based auth, logout is handled client-side by removing token
     return {"message": "Logged out successfully"}
+
+
+@router.get("/me")
+async def get_me(current_user: Any = Depends(authenticate_request)):
+    """Current user endpoint for frontend session validation on page reload"""
+    email = getattr(current_user, "email", "")
+    tenant_id = getattr(current_user, "tenant_id", "tenant-a")
+    name = "Sunset Properties Manager" if "sunset" in email else ("Ocean Rentals Manager" if "ocean" in email else email.split("@")[0])
+    
+    return {
+        "id": getattr(current_user, "id", "user-id"),
+        "email": email,
+        "name": name,
+        "is_admin": getattr(current_user, "is_admin", False),
+        "tenant_id": tenant_id,
+        "permissions": [],
+        "cities": getattr(current_user, "cities", [])
+    }
+
